@@ -22,15 +22,12 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import android.webkit.JavascriptInterface
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.databinding.DataBindingUtil
@@ -39,6 +36,8 @@ import com.google.android.material.snackbar.Snackbar
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
+    //https://www.ilovepdf.com/
+    //https://www.multiplatform.network/
     private var webUrl = "https://www.ilovepdf.com/"
     private val multiplePermissionId = 14
     private val multiplePermissionNameList = if (Build.VERSION.SDK_INT >= 33) {
@@ -49,7 +48,17 @@ class MainActivity : AppCompatActivity() {
             android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
         )
     }
-
+    private var isLoaded = false
+    private var doubleBackToExitPressedOnce = false
+    private val networkConnectivityObserver: NetworkConnectivityObserver by lazy {
+        NetworkConnectivityObserver(this)
+    }
+    private val loadingDialog: Dialog by lazy {
+        Dialog(this)
+    }
+    private val mainBinding: ActivityMainBinding by lazy {
+        DataBindingUtil.setContentView(this, R.layout.activity_main)
+    }
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
     // File picker launcher setup
@@ -58,31 +67,13 @@ class MainActivity : AppCompatActivity() {
             if (result.resultCode == RESULT_OK) {
                 val data: Intent? = result.data
                 filePathCallback?.onReceiveValue(
-                    WebChromeClient.FileChooserParams.parseResult(
-                        result.resultCode, data
-                    )
+                    WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
                 )
             } else {
                 filePathCallback?.onReceiveValue(null)
             }
             filePathCallback = null
         }
-
-    private var isLoaded = false
-    private var doubleBackToExitPressedOnce = false
-
-
-    private val networkConnectivityObserver: NetworkConnectivityObserver by lazy {
-        NetworkConnectivityObserver(this)
-    }
-
-    private val loadingDialog: Dialog by lazy {
-        Dialog(this)
-    }
-
-    private val mainBinding: ActivityMainBinding by lazy {
-        DataBindingUtil.setContentView(this, R.layout.activity_main)
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,9 +90,9 @@ class MainActivity : AppCompatActivity() {
         setting.domStorageEnabled = true
         setting.javaScriptCanOpenWindowsAutomatically = true
         setting.supportMultipleWindows()
+        setting.defaultTextEncodingName = "utf-8"
 
-
-        val snackbar = Snackbar.make(
+        val snackBar = Snackbar.make(
             mainBinding.root, "No Internet Connection", Snackbar.LENGTH_INDEFINITE
         ).setAction("Wifi") {
             startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
@@ -110,8 +101,8 @@ class MainActivity : AppCompatActivity() {
         networkConnectivityObserver.observe(this) {
             when (it) {
                 Status.Available -> {
-                    if (snackbar.isShown) {
-                        snackbar.dismiss()
+                    if (snackBar.isShown) {
+                        snackBar.dismiss()
                     }
                     mainBinding.swipeRefresh.isEnabled = true
                     if (!isLoaded) loadWebView()
@@ -120,7 +111,7 @@ class MainActivity : AppCompatActivity() {
 
                 else -> {
                     showNoInternet()
-                    snackbar.show()
+                    snackBar.show()
                     mainBinding.swipeRefresh.isRefreshing = false
                 }
             }
@@ -174,11 +165,26 @@ class MainActivity : AppCompatActivity() {
                 filePathCallback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?
             ): Boolean {
-                this@MainActivity.filePathCallback?.onReceiveValue(null) // Cancel any ongoing file chooser operation
+                // Cancel any ongoing file chooser operation
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
                 this@MainActivity.filePathCallback = filePathCallback
 
-                // Create an intent to open a file picker
-                val intent = fileChooserParams?.createIntent() ?: Intent()
+                // Create an intent to open a file picker allowing multiple MIME types
+                val intent = fileChooserParams?.createIntent()?.apply {
+                    type = "*/*" // Allow all types
+                    putExtra(
+                        Intent.EXTRA_MIME_TYPES,
+                        arrayOf("application/pdf", "image/jpeg", "image/png")
+                    )
+                } ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                    type = "*/*"
+                    putExtra(
+                        Intent.EXTRA_MIME_TYPES,
+                        arrayOf("application/pdf", "image/jpeg", "image/png")
+                    )
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                }
+
                 return try {
                     filePickerLauncher.launch(intent)
                     true
@@ -189,6 +195,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
         mainBinding.webView.webViewClient =
             object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -221,7 +228,6 @@ class MainActivity : AppCompatActivity() {
                     setProgressDialogVisibility(false)
                     super.onReceivedError(view, request, error)
                 }
-
             }
     }
 
@@ -236,7 +242,6 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         }
-
         return super.onKeyDown(keyCode, event)
     }
 
@@ -266,34 +271,53 @@ class MainActivity : AppCompatActivity() {
         mimeType: String,
         contentLength: Long
     ) {
-        val folder = File(
-            Environment.getExternalStorageDirectory().toString() + "/Download/Image"
-        )
-        if (!folder.exists()) {
-            folder.mkdirs()
+        if (url.startsWith("http") || url.startsWith("https")) {
+
+            val folder = File(
+                Environment.getExternalStorageDirectory().toString() + "/Download/Image"
+            )
+            if (!folder.exists()) {
+                folder.mkdirs()
+            }
+            Toast.makeText(this, "Download Started", Toast.LENGTH_SHORT).show()
+            val request = DownloadManager.Request(Uri.parse(url))
+            request.setMimeType(mimeType)
+            val cookie = CookieManager.getInstance().getCookie(url)
+            request.addRequestHeader("cookie", cookie)
+            request.addRequestHeader("User-Agent", userAgent)
+            request.setAllowedNetworkTypes(
+                DownloadManager.Request.NETWORK_WIFI or DownloadManager.Request.NETWORK_MOBILE
+            )
+            val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+            request.setTitle(fileName)
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            request.setDestinationInExternalPublicDir(
+                Environment.DIRECTORY_DOWNLOADS, "Image/$fileName"
+            )
+            val downloadManager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+            downloadManager.enqueue(request)
+
+        } else if (url.startsWith("blob")) {
+            // Intercept blob URL, trigger JavaScript download script
+            mainBinding.webView.evaluateJavascript(
+                """(function() {
+                            var xhr = new XMLHttpRequest();
+                            xhr.open('GET', '$url', true);
+                            xhr.responseType = 'blob';
+                            xhr.onload = function() {
+                                if (xhr.status === 200) {
+                                    var reader = new FileReader();
+                                    reader.onloadend = function() {
+                                        Android.receiveBase64(reader.result.split(',')[1], '$mimeType');
+                                    };
+                                    reader.readAsDataURL(xhr.response);
+                                }
+                            };
+                            xhr.send();
+                        })();""", null
+            )
         }
-        Toast.makeText(this, "Download Started", Toast.LENGTH_SHORT).show()
-
-
-        val request = DownloadManager.Request(Uri.parse(url))
-        request.setMimeType(mimeType)
-        val cookie = CookieManager.getInstance().getCookie(url)
-        request.addRequestHeader("cookie", cookie)
-        request.addRequestHeader("User-Agent", userAgent)
-        request.setAllowedNetworkTypes(
-            DownloadManager.Request.NETWORK_WIFI or DownloadManager.Request.NETWORK_MOBILE
-        )
-        val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
-        request.setTitle(fileName)
-        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        request.setDestinationInExternalPublicDir(
-            Environment.DIRECTORY_DOWNLOADS, "Image/$fileName"
-        )
-        val downloadManager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
-        downloadManager.enqueue(request)
-
     }
-
 
     private fun checkMultiplePermission(): Boolean {
         val listPermissionNeeded = arrayListOf<String>()
@@ -320,7 +344,6 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-
         if (requestCode == multiplePermissionId) {
             if (grantResults.isNotEmpty()) {
                 var isGrant = true
